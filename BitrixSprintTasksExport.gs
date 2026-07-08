@@ -504,19 +504,26 @@ function sePromptPeriod_(ui) {
 }
 
 // Постранично тянет записи учёта времени (task.elapseditem.getlist) за период.
-// ВАЖНО: этот legacy-метод не принимает ORDER через REST (падает «Invalid order ""»),
-// поэтому сортируем результат сами — по дате записи, сначала новые.
+// ВАЖНО: у этого legacy-метода параметры ПОЗИЦИОННЫЕ — order, filter, params, select
+// (имена ключей движок игнорирует, важен порядок). Поэтому:
+//   • ORDER идёт первым и оставлен пустым ({}) — с полем сортировки метод падает
+//     («Invalid order»), а нужный порядок мы наводим сами ниже (items.sort);
+//   • если пропустить ORDER, на его место встаёт FILTER и метод ругается
+//     «order must not contain key ">=CREATED_DATE"».
+// Ключ start движок обрабатывает отдельно как курсор постраничной навигации.
 function seFetchElapsed_(userId, fromApi, toApi) {
   var items = [];
   var start = 0, guard = 0;
   while (guard++ < 400) {
     var data = seCallBitrix_('task.elapseditem.getlist', {
-      FILTER: {
+      ORDER: {},                       // позиция 1 — сортировка (пусто; сортируем сами)
+      FILTER: {                        // позиция 2 — фильтр
+        'USER_ID': userId,
         '>=CREATED_DATE': fromApi,
-        '<=CREATED_DATE': toApi,
-        'USER_ID': userId
+        '<=CREATED_DATE': toApi
       },
-      SELECT: ['ID', 'TASK_ID', 'USER_ID', 'SECONDS', 'MINUTES', 'COMMENT_TEXT', 'CREATED_DATE'],
+      PARAMS: {},                      // позиция 3 — доп. параметры (не нужны)
+      SELECT: ['ID', 'TASK_ID', 'USER_ID', 'SECONDS', 'MINUTES', 'COMMENT_TEXT', 'CREATED_DATE'], // позиция 4
       start: start
     });
     var batch = data.result || [];
