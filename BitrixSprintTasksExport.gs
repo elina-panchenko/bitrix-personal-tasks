@@ -12,6 +12,12 @@
  * выгружает все задачи, где ВЫ исполнитель и статус = «Отложена» (функция
  * seExportDeferredTasks).
  *
+ * Третья кнопка — «Выгрузить задачи за период»: спрашивает начало и конец периода
+ * и выгружает на лист «Учёт времени» детализацию по учёту времени — по одной строке
+ * на каждую запись учёта (дата/время, длительность, комментарий, задача, проект и,
+ * если задача входит в спринт, id и название спринта). Берутся все записи, где ВЫ
+ * учитывали время в этот период (функция seExportTimeByPeriod).
+ *
  * КАК ПОДКЛЮЧИТЬ (один раз):
  *   1. Откройте таблицу → Расширения → Apps Script. Вставьте этот файл целиком.
  *   2. Сохраните, обновите вкладку таблицы — появится меню «Спринт».
@@ -46,6 +52,11 @@ var SE_MAX_TASKS   = 2000;              // предохранитель от б�
 var SE_DEFERRED_SHEET  = 'Отложенные';  // лист для отложенных задач (перезаписывается)
 var SE_DEFERRED_STATUS = 6;             // статус Bitrix «Отложена» = 6
 
+// Кнопка «Выгрузить задачи за период» (детализация по учёту времени)
+var SE_TIMELOG_SHEET = 'Учёт времени';  // лист для детализации по учёту времени (перезаписывается)
+var SE_PERIOD_FROM   = '';              // запуск из редактора: начало периода ГГГГ-ММ-ДД (иначе спросит в диалоге)
+var SE_PERIOD_TO     = '';              // запуск из редактора: конец периода  ГГГГ-ММ-ДД
+
 // Ключи в свойствах скрипта — те же, что в соседних скриптах (переиспользуются).
 var SE_PROP_WEBHOOK  = 'BITRIX_WEBHOOK';
 var SE_PROP_GROUP_ID = 'BITRIX_SCRUM_GROUP_ID';
@@ -77,6 +88,13 @@ var SE_DEFERRED_HEADERS = [
   'Проект/Группа', 'Ссылка'
 ];
 
+// Заголовки листа «Учёт времени» — по одной строке на каждую запись учёта времени.
+// «ID спринта»/«Спринт» заполняются, только если задача входит в спринт.
+var SE_TIMELOG_HEADERS = [
+  'Дата и время', 'Длительность', 'Длительность, мин', 'Комментарий',
+  'Задача', 'ID задачи', 'Проект/Группа', 'ID спринта', 'Спринт', 'Ссылка'
+];
+
 // ───────────────────── Меню ─────────────────────
 function onOpen() {
   var ui;
@@ -84,6 +102,7 @@ function onOpen() {
   ui.createMenu('Спринт')
     .addItem('Выгрузить задачи спринта', 'seExportSprintTasks')
     .addItem('Выгрузить мои отложенные задачи', 'seExportDeferredTasks')
+    .addItem('Выгрузить задачи за период', 'seExportTimeByPeriod')
     .addSeparator()
     .addItem('Указать вебхук', 'seSetWebhook')
     .addToUi();
@@ -377,6 +396,187 @@ function seResponsibleId_() {
   return String(me.result.ID);
 }
 
+// ───────────────────── Задачи за период (учёт времени) ─────────────────────
+function seExportTimeByPeriod() {
+  var ui = seUi_();
+
+  // 1. Спрашиваем период (диалог) либо берём SE_PERIOD_FROM/SE_PERIOD_TO (из редактора)
+  var period = sePromptPeriod_(ui);
+  if (!period) return; // отменили диалог
+
+  var userId = seResponsibleId_();
+
+  // 2. Тянем все записи учёта времени этого пользователя за период
+  var items = seFetchElapsed_(userId, period.fromApi, period.toApi);
+
+  // 3. Разворачиваем в строки: по задачам подтягиваем название/группу/спринт (с кэшем)
+  var portalBase = seGetWebhook_().replace(/\/rest\/.*/, '');
+  var taskCache = {}, groupCache = {}, sprintCache = {};
+  var rows = [SE_TIMELOG_HEADERS];
+  var totalSec = 0;
+
+  for (var i = 0; i < items.length; i++) {
+    var it = items[i];
+    var taskId  = String(sePick_(it, ['TASK_ID', 'taskId']));
+    var seconds = Number(sePick_(it, ['SECONDS', 'seconds'])) || 0;
+    var comment = sePick_(it, ['COMMENT_TEXT', 'commentText']) || '';
+    var created = sePick_(it, ['CREATED_DATE', 'createdDate']);
+    totalSec += seconds;
+
+    var info = seTaskInfo_(taskId, taskCache);
+    var sprint = seSprintNameById_(info.sprintId, info.groupId, sprintCache);
+
+    rows.push([
+      seFmtDate_(created),
+      seDuration_(seconds),
+      seRound1_(seconds / 60),
+      comment,
+      info.title,
+      Number(taskId) || taskId,
+      seGroupName_(info.groupId, groupCache),
+      sprint.id,
+      sprint.name,
+      seTaskUrl_(portalBase, userId, taskId)
+    ]);
+  }
+
+  // 4. Пишем лист
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName(SE_TIMELOG_SHEET) || ss.insertSheet(SE_TIMELOG_SHEET);
+  sheet.clear();
+
+  var title = 'Учёт времени за ' + period.from + ' — ' + period.to +
+    ' · пользователь ID ' + userId +
+    ' · записей: ' + items.length +
+    ' · итого: ' + seDuration_(totalSec) + ' (' + seRound1_(totalSec / 60) + ' мин)';
+  sheet.getRange(1, 1, 1, SE_TIMELOG_HEADERS.length).merge().setValue(title)
+    .setFontWeight('bold').setBackground('#e8eaf6');
+
+  if (rows.length === 1) rows.push(['(за этот период нет записей учёта времени)']);
+
+  var startRow = 2;
+  sheet.getRange(startRow, 1, rows.length, SE_TIMELOG_HEADERS.length).setValues(sePadRows_(rows));
+  sheet.getRange(startRow, 1, 1, SE_TIMELOG_HEADERS.length).setFontWeight('bold').setBackground('#f1f8e9');
+  sheet.setFrozenRows(startRow);
+  sheet.autoResizeColumns(1, SE_TIMELOG_HEADERS.length);
+
+  var msg = 'Учёт времени за ' + period.from + '—' + period.to + ': записей ' + items.length +
+    ', итого ' + seDuration_(totalSec) + '. Лист «' + SE_TIMELOG_SHEET + '».';
+  Logger.log(title + '\n' + msg);
+  if (ui) SpreadsheetApp.getActiveSpreadsheet().toast(msg, 'Спринт', 8);
+}
+
+// Спрашивает период двумя диалогами; из редактора берёт SE_PERIOD_FROM/SE_PERIOD_TO.
+// Возвращает { from, to, fromApi, toApi } или null, если пользователь отменил.
+function sePromptPeriod_(ui) {
+  var from, to;
+  if (ui) {
+    var r1 = ui.prompt('Задачи за период',
+      'Начало периода (ГГГГ-ММ-ДД), например 2026-07-01:', ui.ButtonSet.OK_CANCEL);
+    if (r1.getSelectedButton() !== ui.Button.OK) return null;
+    from = (r1.getResponseText() || '').trim();
+
+    var r2 = ui.prompt('Задачи за период',
+      'Конец периода (ГГГГ-ММ-ДД), например 2026-07-07:', ui.ButtonSet.OK_CANCEL);
+    if (r2.getSelectedButton() !== ui.Button.OK) return null;
+    to = (r2.getResponseText() || '').trim();
+  } else {
+    from = String(SE_PERIOD_FROM || '').trim();
+    to   = String(SE_PERIOD_TO   || '').trim();
+    if (!from || !to) {
+      throw new Error('Запуск из редактора: заполни SE_PERIOD_FROM и SE_PERIOD_TO вверху файла (формат ГГГГ-ММ-ДД).');
+    }
+  }
+
+  var reDay = /^\d{4}-\d{2}-\d{2}$/;
+  if (!reDay.test(from) || !reDay.test(to)) {
+    if (ui) ui.alert('Даты нужно вводить как ГГГГ-ММ-ДД, например 2026-07-01.');
+    throw new Error('Неверный формат даты. Ожидается ГГГГ-ММ-ДД (например 2026-07-01).');
+  }
+  if (from > to) { var tmp = from; from = to; to = tmp; } // подстрахуемся, если перепутали местами
+
+  return {
+    from: from,
+    to: to,
+    fromApi: from + ' 00:00:00',
+    toApi:   to + ' 23:59:59'
+  };
+}
+
+// Постранично тянет записи учёта времени (task.elapseditem.getlist) за период.
+function seFetchElapsed_(userId, fromApi, toApi) {
+  var items = [];
+  var start = 0, guard = 0;
+  while (guard++ < 400) {
+    var data = seCallBitrix_('task.elapseditem.getlist', {
+      ORDER:  { CREATED_DATE: 'DESC' },
+      FILTER: {
+        '>=CREATED_DATE': fromApi,
+        '<=CREATED_DATE': toApi,
+        'USER_ID': userId
+      },
+      SELECT: ['ID', 'TASK_ID', 'USER_ID', 'SECONDS', 'MINUTES', 'COMMENT_TEXT', 'CREATED_DATE'],
+      start: start
+    });
+    var batch = data.result || [];
+    if (!Array.isArray(batch)) batch = batch.items || batch.tasks || []; // на случай иной формы ответа
+    items = items.concat(batch);
+    if (items.length >= SE_MAX_TASKS) break;
+    if (typeof data.next === 'undefined' || batch.length === 0) break;
+    start = data.next;
+  }
+  return items;
+}
+
+// Данные задачи по её ID (с кэшем): название, группа, исполнитель и спринт (entityId).
+function seTaskInfo_(taskId, cache) {
+  taskId = String(taskId);
+  if (cache[taskId]) return cache[taskId];
+  var info = { title: taskId, groupId: '', responsibleId: '', sprintId: '' };
+
+  try {
+    var d = seCallBitrix_('tasks.task.get', {
+      taskId: taskId,
+      select: ['ID', 'TITLE', 'GROUP_ID', 'RESPONSIBLE_ID']
+    });
+    var t = d.result && d.result.task;
+    if (t) {
+      info.title         = t.title || taskId;
+      info.groupId       = t.groupId || '';
+      info.responsibleId = t.responsibleId || '';
+    }
+  } catch (e) { /* нет доступа — оставим ID вместо названия */ }
+
+  try {
+    var sd = seCallBitrix_('tasks.api.scrum.task.get', { id: taskId });
+    var scrum = sd.result || {};
+    if (scrum.entityId) info.sprintId = String(scrum.entityId);
+  } catch (e) { /* задача не из Scrum — спринта нет */ }
+
+  cache[taskId] = info;
+  return info;
+}
+
+// Название спринта по его id. entityId у Scrum-задачи может быть и бэклогом —
+// поэтому имя ищем в списке спринтов группы; не нашли → задача не в спринте.
+function seSprintNameById_(sprintId, groupId, cache) {
+  var none = { id: '', name: '' };
+  if (!sprintId) return none;
+  sprintId = String(sprintId);
+  if (cache[sprintId]) return cache[sprintId];
+
+  cache.__groups__ = cache.__groups__ || {};
+  if (groupId && !cache.__groups__[String(groupId)]) {
+    cache.__groups__[String(groupId)] = true;      // разворачиваем группу лишь один раз
+    var list = seSprintsOfGroup_(groupId);
+    for (var i = 0; i < list.length; i++) {
+      var s = list[i];
+      cache[String(s.id)] = { id: String(s.id), name: s.name || '' };
+    }
+  }
+  return cache[sprintId] || (cache[sprintId] = none);
+}
+
 // ───────────────────── Задачи (постранично) ─────────────────────
 function seFetchGroupTasks_(groupId) {
   return seFetchTasks_({ GROUP_ID: groupId });
@@ -469,6 +669,27 @@ function seHours_(sec) {
 }
 
 function seRound1_(x) { return Math.round(x * 10) / 10; }
+
+// Секунды → строка «Ч:ММ:СС» (для колонки «Длительность»)
+function seDuration_(sec) {
+  var n = Math.round(Number(sec) || 0);
+  if (n < 0) n = 0;
+  var h = Math.floor(n / 3600);
+  var m = Math.floor((n % 3600) / 60);
+  var s = n % 60;
+  return h + ':' + sePad2_(m) + ':' + sePad2_(s);
+}
+
+function sePad2_(x) { return (x < 10 ? '0' : '') + x; }
+
+// Первое непустое значение по списку возможных ключей (Bitrix отдаёт то ВЕРХНИЙ_РЕГИСТР, то camelCase)
+function sePick_(obj, keys) {
+  for (var i = 0; i < keys.length; i++) {
+    var v = obj[keys[i]];
+    if (v !== undefined && v !== null) return v;
+  }
+  return '';
+}
 
 // «В срок?» — как в BitrixTasksToSheets.gs
 function seOnTime_(t) {
