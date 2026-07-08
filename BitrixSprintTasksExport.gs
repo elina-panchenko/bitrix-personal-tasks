@@ -504,12 +504,13 @@ function sePromptPeriod_(ui) {
 }
 
 // Постранично тянет записи учёта времени (task.elapseditem.getlist) за период.
+// ВАЖНО: этот legacy-метод не принимает ORDER через REST (падает «Invalid order ""»),
+// поэтому сортируем результат сами — по дате записи, сначала новые.
 function seFetchElapsed_(userId, fromApi, toApi) {
   var items = [];
   var start = 0, guard = 0;
   while (guard++ < 400) {
     var data = seCallBitrix_('task.elapseditem.getlist', {
-      ORDER:  { CREATED_DATE: 'DESC' },
       FILTER: {
         '>=CREATED_DATE': fromApi,
         '<=CREATED_DATE': toApi,
@@ -525,6 +526,10 @@ function seFetchElapsed_(userId, fromApi, toApi) {
     if (typeof data.next === 'undefined' || batch.length === 0) break;
     start = data.next;
   }
+  items.sort(function (a, b) {
+    return seTime_(sePick_(b, ['CREATED_DATE', 'createdDate'])) -
+           seTime_(sePick_(a, ['CREATED_DATE', 'createdDate']));
+  });
   return items;
 }
 
@@ -689,6 +694,13 @@ function sePick_(obj, keys) {
     if (v !== undefined && v !== null) return v;
   }
   return '';
+}
+
+// Дата-строка → миллисекунды (для сортировки); некорректная/пустая → 0
+function seTime_(s) {
+  if (!s) return 0;
+  var t = new Date(s).getTime();
+  return isNaN(t) ? 0 : t;
 }
 
 // «В срок?» — как в BitrixTasksToSheets.gs
