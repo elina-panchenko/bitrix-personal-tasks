@@ -504,35 +504,32 @@ function sePromptPeriod_(ui) {
 }
 
 // Постранично тянет записи учёта времени (task.elapseditem.getlist) за период.
-// ВАЖНО: у этого legacy-метода параметры ПОЗИЦИОННЫЕ — order, filter, params, select
-// (имена ключей движок игнорирует, важен порядок). Поэтому:
-//   • ORDER идёт первым и оставлен пустым ({}) — с полем сортировки метод падает
-//     («Invalid order»), а нужный порядок мы наводим сами ниже (items.sort);
-//   • если пропустить ORDER, на его место встаёт FILTER и метод ругается
-//     «order must not contain key ">=CREATED_DATE"».
-// Ключ start движок обрабатывает отдельно как курсор постраничной навигации.
+// ВАЖНО: у этого метода параметры ПОЗИЦИОННЫЕ и порядок строго по документации Bitrix:
+//   ORDER, FILTER, SELECT, PARAMS (имена ключей движок игнорирует — важен порядок!).
+// Пагинация — через PARAMS.NAV_PARAMS (nPageSize ≤ 50, iNumPage), а не через start.
+// Док: apidocs.bitrix24.com/api-reference/tasks/elapsed-item/task-elapsed-item-get-list.html
 function seFetchElapsed_(userId, fromApi, toApi) {
   var items = [];
-  var start = 0, guard = 0;
+  var page = 1, guard = 0;
   while (guard++ < 400) {
     var data = seCallBitrix_('task.elapseditem.getlist', {
-      ORDER: {},                       // позиция 1 — сортировка (пусто; сортируем сами)
-      FILTER: {                        // позиция 2 — фильтр
-        'USER_ID': userId,
+      ORDER: { ID: 'desc' },                          // 1 — сортировка (ID убыв. ≈ сначала новые)
+      FILTER: {                                       // 2 — фильтр
         '>=CREATED_DATE': fromApi,
-        '<=CREATED_DATE': toApi
+        '<=CREATED_DATE': toApi,
+        'USER_ID': userId
       },
-      PARAMS: {},                      // позиция 3 — доп. параметры (не нужны)
-      SELECT: ['ID', 'TASK_ID', 'USER_ID', 'SECONDS', 'MINUTES', 'COMMENT_TEXT', 'CREATED_DATE'], // позиция 4
-      start: start
+      SELECT: ['ID', 'TASK_ID', 'USER_ID', 'SECONDS', 'MINUTES', 'COMMENT_TEXT', 'CREATED_DATE'], // 3 — поля
+      PARAMS: { NAV_PARAMS: { nPageSize: 50, iNumPage: page } }  // 4 — постранично
     });
     var batch = data.result || [];
     if (!Array.isArray(batch)) batch = batch.items || batch.tasks || []; // на случай иной формы ответа
     items = items.concat(batch);
     if (items.length >= SE_MAX_TASKS) break;
-    if (typeof data.next === 'undefined' || batch.length === 0) break;
-    start = data.next;
+    if (batch.length < 50) break;    // последняя (неполная) страница
+    page++;
   }
+  // Для точного соответствия примеру сортируем по дате записи (сначала новые).
   items.sort(function (a, b) {
     return seTime_(sePick_(b, ['CREATED_DATE', 'createdDate'])) -
            seTime_(sePick_(a, ['CREATED_DATE', 'createdDate']));
