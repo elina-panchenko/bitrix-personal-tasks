@@ -79,6 +79,7 @@ function onOpen() {
     .addItem('Обновить задачи + ретро', 'updateBitrixTasks')
     .addItem('Выгрузить за сегодня (время / выполнено)', 'exportTodayTimeAndDone')
     .addItem('Учёт времени за период', 'tpExportTimeByPeriod')
+    .addItem('Все мои задачи (без спринтов)', 'mtExportMyTasks')
     .addItem('Пересоздать лист «Планирование»', 'rebuildPlanningSheet')
     .addSeparator()
     .addItem('Указать вебхук', 'setBitrixWebhook')
